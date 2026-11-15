@@ -75,6 +75,39 @@ async function tryFetch(
 }
 
 /** Audits one public page. Throws when the URL is blocked or the page cannot be fetched. */
+/** Every @type found in the page's JSON-LD blocks, including nested @graph and child nodes. */
+export function collectSchemaTypes(html: string): string[] {
+  const types: string[] = [];
+  const blocks =
+    html.match(
+      /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
+    ) ?? [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child);
+      return;
+    }
+    if (node && typeof node === "object") {
+      const obj = node as Record<string, unknown>;
+      const t = obj["@type"];
+      if (typeof t === "string") types.push(t);
+      else if (Array.isArray(t)) {
+        for (const x of t) if (typeof x === "string") types.push(x);
+      }
+      for (const value of Object.values(obj)) walk(value);
+    }
+  };
+  for (const block of blocks) {
+    const inner = block.replace(/<script[^>]*>|<\/script>/gi, "");
+    try {
+      walk(JSON.parse(inner));
+    } catch {
+      /* skip invalid JSON-LD */
+    }
+  }
+  return types;
+}
+
 export async function runAudit(url: string) {
   // SSRF guard: reject internal/reserved targets before any server-side fetch.
   const target = await assertPublicHttpUrl(url);
@@ -212,29 +245,12 @@ export async function runAudit(url: string) {
     html.match(
       /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi,
     ) ?? [];
-  const schemaTypes: string[] = [];
-  for (const block of jsonLdBlocks) {
-    const inner = block.replace(/<script[^>]*>|<\/script>/gi, "");
-    try {
-      const parsed = JSON.parse(inner);
-      const items = Array.isArray(parsed) ? parsed : [parsed];
-      for (const item of items) {
-        if (item?.["@type"]) {
-          const types = Array.isArray(item["@type"])
-            ? item["@type"]
-            : [item["@type"]];
-          schemaTypes.push(...types);
-        }
-      }
-    } catch {
-      /* skip invalid JSON-LD */
-    }
-  }
+  const schemaTypes = collectSchemaTypes(html);
   checks.push({
     id: "json_ld",
     label: "JSON-LD Structured Data",
     category: "structure",
-    pass: jsonLdBlocks.length > 0,
+    pass: jsonLdBlocks.length > 0 && schemaTypes.length > 0,
     value:
       jsonLdBlocks.length > 0
         ? `${jsonLdBlocks.length} blocks (${schemaTypes.length} types)`
